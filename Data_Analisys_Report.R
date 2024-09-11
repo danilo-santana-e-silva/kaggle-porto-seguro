@@ -8,7 +8,6 @@ install_if_required <- function(package) {
 
 # Install and Load necessary libraries
 install_if_required("tidyverse")
-install_if_required("fastDummies")
 install_if_required("caret")
 install_if_required("pROC")
 
@@ -19,35 +18,37 @@ file_path <- "porto-seguro-safe-driver-prediction/train.csv"
 data <- readr::read_csv(file_path)
 
 # Replace -1 with NA
-data <- data %>%
-  dplyr::mutate(across(everything(), ~ dplyr::na_if(., -1)))
+data <- dplyr::mutate(data, across(everything(), ~ dplyr::na_if(., -1)))
 
-# Remove rows with NAs
+# Remove rows with NAs (consider imputing instead)
 data <- tidyr::drop_na(data)
 
-# Identify and convert columns ending in "cat" to factors
-cols_to_factor <- grep("target|cat$", names(data), value = TRUE)
-data <- data %>%
-  dplyr::mutate(across(all_of(cols_to_factor), as.factor))
+# Identify and convert columns ending in "cat" and "bin" to factors
+cols_to_factor <- grep("target|bin$|cat$", names(data), value = TRUE)
+data <- dplyr::mutate(data, across(all_of(cols_to_factor), as.factor))
 
 # Convert remaining columns to numeric
 cols_to_numeric <- setdiff(names(data), cols_to_factor)
-data <- data %>%
-  dplyr::mutate(across(all_of(cols_to_numeric), as.numeric))
+data <- dplyr::mutate(data, across(all_of(cols_to_numeric), as.numeric))
 
-# Create dummy variables for categorical columns
-data <- fastDummies::dummy_cols(data, select_columns = cols_to_factor)
+# Create dummy variables and add the target column back
+dummy_data <- caret::dummyVars(~ . - target, data = data) %>%
+  predict(newdata = data) %>%
+  as.data.frame() %>%
+  cbind(target = data$target)
+
+# Replace the original data with the dummy data
+data <- dummy_data
 
 # Filter only numeric columns
-numeric_data <- data %>%
-  dplyr::select(where(is.numeric))
+numeric_data <- dplyr::select(data, where(is.numeric))
 
 # Display the structure of the final data
 utils::str(numeric_data)
 
-# Normalize the numeric columns using scale
-normalized_data <- numeric_data %>%
-  dplyr::mutate(across(everything(), ~ scale(.) %>% as.vector()))
+# Normalize the numeric columns using caret
+pre_proc_values <- caret::preProcess(numeric_data, method = c("center", "scale"))
+normalized_data <- stats::predict(pre_proc_values, numeric_data)
 
 # PCA using prcomp
 pca_result <- stats::prcomp(normalized_data, center = TRUE, scale. = TRUE)
@@ -55,27 +56,45 @@ pca_result <- stats::prcomp(normalized_data, center = TRUE, scale. = TRUE)
 # Plot the scree plot
 graphics::plot(pca_result, type = "l")
 
-# Select the number of principal components to use (e.g., the first 10 components)
+# Select the number of principal components to use (e.g., 10 components)
 num_components <- 10
 pca_data <- pca_result$x[, 1:num_components]
 
 # Add the target column to the principal components
 data_pca <- base::data.frame(target = data$target, pca_data)
 
-# Ensure trainControl is set to save class probabilities
-train_control <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
-
 # Convert class levels to valid R variable names
-levels(data_pca$target) <- make.names(levels(data_pca$target))
+levels(data_pca$target) <- base::make.names(levels(data_pca$target))
 
 # Define a seed for reproducibility
-base::set.seed(5997760) 
+base::set.seed(5997760)
 
-# Train the model using k-fold cross-validation
-model_pca_cv <- train(target ~ ., data = data_pca, method = "glm", family = binomial, trControl = train_control, metric = "ROC")
+# Split the data into training and testing sets (80:20 ratio)
+train_index <- caret::createDataPartition(data_pca$target, p = 0.8, list = FALSE)
+train_data <- data_pca[train_index, ]
+test_data <- data_pca[-train_index, ]
 
-# Print the cross-validation results
-base::print(model_pca_cv)
+# Train the model on the training set
+model_pca <- caret::train(target ~ .,
+                          data = train_data,
+                          method = "glm",
+                          family = binomial)
+
+# Print the training results
+base::print(model_pca)
+
+# Make predictions on the testing set
+predictions <- stats::predict(model_pca, newdata = test_data, type = "prob")
+
+# Ensure the predictor is numeric
+predictions <- base::as.numeric(predictions[,2])
+
+# Calculate AUC value
+auc_value <- pROC::roc(test_data$target, predictions)$auc
 
 # Plot the ROC curve
-pROC::plot.roc(model_pca_cv$pred$obs, model_pca_cv$pred$glm)
+pROC::plot.roc(test_data$target, predictions, 
+               main = base::paste("ROC Curve (AUC =", base::round(auc_value, 2),")"))
+
+# Print the AUC value
+base::print(auc_value)
