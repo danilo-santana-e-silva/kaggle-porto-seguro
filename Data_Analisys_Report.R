@@ -1,104 +1,81 @@
-install.packages("fastDummies")
-library(fastDummies)
+# Function to install and load a package if not already installed
+install_if_required <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+    library(package, character.only = TRUE)
+  }
+}
 
-# Definir o caminho do arquivo
+# Install and Load necessary libraries
+install_if_required("tidyverse")
+install_if_required("fastDummies")
+install_if_required("caret")
+install_if_required("pROC")
+
+# Define the file path
 file_path <- "porto-seguro-safe-driver-prediction/train.csv"
-data <- read.csv(file_path)
 
-# Identificar e definir colunas terminadas em "bin" e "cat" como fatores
-cols_to_factor <- grep("target|bin$|cat$", names(data), value = TRUE)
-data[cols_to_factor] <- lapply(data[cols_to_factor], as.factor)
+# Read the CSV file
+data <- readr::read_csv(file_path)
 
-# Identificar e definir colunas terminadas em "ind" e "calc" como ordinais
-columns_to_order <- grep("ps_ind_0[13]|ps_ind_01[45]|ps_car_11$|ps_calc_0[456789]|ps_calc_1[01234]", names(data), value = TRUE)
-data[columns_to_order] <- lapply(data[columns_to_order], as.ordered)
+# Replace -1 with NA
+data <- data %>%
+  dplyr::mutate(across(everything(), ~ dplyr::na_if(., -1)))
 
-# Definir as demais colunas como numéricas
-cols_to_numeric <- setdiff(names(data), c(cols_to_factor, columns_to_order))
-data[cols_to_numeric] <- lapply(data[cols_to_numeric], as.numeric)
+# Remove rows with NAs
+data <- tidyr::drop_na(data)
 
-# Substituir -1 por NA
-data[data == -1] <- NA
+# Identify and convert columns ending in "cat" to factors
+cols_to_factor <- grep("target|cat$", names(data), value = TRUE)
+data <- data %>%
+  dplyr::mutate(across(all_of(cols_to_factor), as.factor))
 
-# Remover linhas com NAs
-data <- na.omit(data)
+# Convert remaining columns to numeric
+cols_to_numeric <- setdiff(names(data), cols_to_factor)
+data <- data %>%
+  dplyr::mutate(across(all_of(cols_to_numeric), as.numeric))
 
-# Criar variáveis dummy para colunas categóricas
-data <- dummy_cols(data, select_columns = cols_to_factor)
+# Create dummy variables for categorical columns
+data <- fastDummies::dummy_cols(data, select_columns = cols_to_factor)
 
-#########################################
-# Criar uma partição de treino e teste
-set.seed(5997760) # Define a semente para reprodução dos resultados
-train_indices <- sample(1:nrow(data), size = 0.7 * nrow(data), replace = FALSE) # 70% dos dados para treino
-train_data <- data[train_indices, ] # Dados de treino
-test_data <- data[-train_indices, ] # Dados de teste
+# Filter only numeric columns
+numeric_data <- data %>%
+  dplyr::select(where(is.numeric))
 
-# Aplicar GLM
-model <- glm(target ~ ., data = train_data, family = binomial)
+# Display the structure of the final data
+utils::str(numeric_data)
 
-# Imprimir o resumo do modelo
-summary(model)
+# Normalize the numeric columns using scale
+normalized_data <- numeric_data %>%
+  dplyr::mutate(across(everything(), ~ scale(.) %>% as.vector()))
 
-# Predict the target variable on the test data
-predictions <- predict(model, newdata = test_data, type = "response")
+# PCA using prcomp
+pca_result <- stats::prcomp(normalized_data, center = TRUE, scale. = TRUE)
 
-# Calculate AUC
-library(pROC)
-roc_curve <- roc(test_data$target, predictions)
-auc_value <- auc(roc_curve)
+# Plot the scree plot
+graphics::plot(pca_result, type = "l")
 
-# Print the performance metrics
-cat("Accuracy:", accuracy, "\n")
-cat("AUC:", auc_value, "\n")
-
-# Plotar a curva ROC
-plot(roc_curve, main = paste("ROC Curve (AUC =", round(auc_value, 2), ")"))
-
-str(data)
-##########################################
-# Selecionar apenas as colunas numéricas para a PCA
-numeric_data <- data[cols_to_numeric]
-pca_result <- prcomp(numeric_data, center = TRUE, scale. = TRUE)
-plot(pca_result, type = "l")
-
-# Selecionar o número de componentes principais a serem usados (por exemplo, os primeiros 10 componentes)
-num_components <- 5
+# Select the number of principal components to use (e.g., the first 10 components)
+num_components <- 10
 pca_data <- pca_result$x[, 1:num_components]
 
-# Adicionar a coluna de destino aos componentes principais
-data_pca <- data.frame(target = data$target, pca_data)
+# Add the target column to the principal components
+data_pca <- base::data.frame(target = data$target, pca_data)
 
-# Ajustar um modelo de regressão logística binária utilizando apenas os componentes principais
-model_pca <- glm(target ~ ., data = data_pca, family = binomial)
+# Ensure trainControl is set to save class probabilities
+train_control <- trainControl(method = "cv", number = 5, classProbs = TRUE, savePredictions = TRUE)
 
-# Imprimir o resumo do modelo
-summary(model_pca)
+# Convert class levels to valid R variable names
+levels(data_pca$target) <- make.names(levels(data_pca$target))
 
-##############################################################################################
-# Instalar e carregar pacotes necessários
-install.packages("pROC")
-library(pROC)
+# Define a seed for reproducibility
+base::set.seed(5997760) 
 
-# Transformar os dados de teste usando PCA
-test_data[cols_to_factor] <- lapply(test_data[cols_to_factor], as.factor)
-test_data[columns_to_order] <- lapply(test_data[columns_to_order], as.ordered)
-test_data[cols_to_numeric] <- lapply(test_data[cols_to_numeric], as.numeric)
-test_data[test_data == -1] <- NA
-test_data <- na.omit(test_data)
-test_data <- dummy_cols(test_data, select_columns = cols_to_factor)
-numeric_test_data <- test_data[cols_to_numeric]
-pca_test_data <- predict(pca_result, newdata = numeric_test_data)
-pca_test_data <- pca_test_data[, 1:num_components]
+# Train the model using k-fold cross-validation
+model_pca_cv <- train(target ~ ., data = data_pca, method = "glm", family = binomial, trControl = train_control, metric = "ROC")
 
-# Adicionar a coluna de destino aos componentes principais dos dados de teste
-test_data_pca <- data.frame(target = test_data$target, pca_test_data)
+# Print the cross-validation results
+base::print(model_pca_cv)
 
-# Prever os valores usando o modelo ajustado
-predictions <- predict(model_pca, newdata = test_data_pca, type = "response")
-
-# Calcular a AUC
-roc_curve <- roc(test_data_pca$target, predictions)
-auc_value <- auc(roc_curve)
-
-# Plotar a curva ROC
-plot(roc_curve, main = paste("ROC Curve (AUC =", round(auc_value, 2), ")"))
+# Plot the ROC curve
+pROC::plot.roc(model_pca_cv$pred$obs, model_pca_cv$pred$glm)
