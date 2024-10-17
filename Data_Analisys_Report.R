@@ -51,7 +51,7 @@ graphics::plot(pca_result, type = "l", main = "Scree Plot")
 
 # Selecionar o número de componentes principais a ser utilizado (por exemplo, 10 componentes)
 num_components <- 35
-pca_data <- pca_result$x[, 1:num_components]
+pca_data <- pca_result$x[, c(1:num_components, 155:ncol(pca_result$x))]
 
 # Adicionar a coluna target aos componentes principais
 data_pca <- base::data.frame(target = data$target, pca_data)
